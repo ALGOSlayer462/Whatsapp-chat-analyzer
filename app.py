@@ -217,6 +217,7 @@ with tab_act:
     else:
         fig = px.imshow(heat, aspect="auto", color_continuous_scale=["#0B141A", TEAL, GREEN],
                         labels=dict(x="Hour", y="Day", color="Messages"))
+        fig.update_xaxes(type="category")
         st.plotly_chart(style(fig, 400), width="stretch")
 
 with tab_users:
