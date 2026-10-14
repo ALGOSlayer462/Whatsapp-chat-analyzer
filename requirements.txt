@@ -6,3 +6,5 @@ wordcloud
 pandas
 emoji>=2.0
 plotly
+scikit-learn
+nltk

@@ -1,9 +1,13 @@
+import hashlib
+
 import matplotlib.pyplot as plt
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
 import helper
+import ml_features as ml
 import preprocessor
 
 # ------------------------------------------------------------------ page setup
@@ -72,6 +76,39 @@ def load(data: str):
     return preprocessor.preprocess(data)
 
 
+@st.cache_resource(show_spinner="ML models train ho rahe hain (pehli baar ~10-20 sec)...")
+def get_models():
+    return ml.train_all()
+
+
+@st.cache_data(show_spinner="Messages par sentiment / toxicity / spam models chal rahe hain...")
+def run_ml(_models, user, key, _df):
+    return ml.analyze_chat(_models, user, _df)
+
+
+@st.cache_resource(show_spinner="Next-word model ban raha hai...")
+def get_next_word(user, key, _df):
+    return ml.build_next_word_model(user, _df)
+
+
+def model_card(m, class_names):
+    mt = m["metrics"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Accuracy", f"{mt['accuracy']:.1%}")
+    c2.metric("Precision", f"{mt['precision']:.1%}")
+    c3.metric("Recall", f"{mt['recall']:.1%}")
+    c4.metric("F1-score", f"{mt['f1']:.1%}")
+    st.caption(f"{mt['average']} average • train {mt['train_size']:,} / hold-out test {mt['test_size']:,} samples "
+               f"• hand-written seed examples: {mt['seed_count']:,}")
+    cm = pd.DataFrame(mt["confusion"], index=[f"Actual {c}" for c in class_names],
+                      columns=[f"Pred {c}" for c in class_names])
+    fig = px.imshow(cm, text_auto=True, color_continuous_scale=["#0B141A", TEAL, GREEN], aspect="auto")
+    fig.update_layout(coloraxis_showscale=False)
+    st.plotly_chart(style(fig, 260), width="stretch")
+
+
+SENT_COLORS = {"Positive": GREEN, "Neutral": "#8696A0", "Negative": PINK}
+
 # ------------------------------------------------------------------ sidebar
 st.sidebar.markdown("## 💬 Chat Analyzer")
 st.sidebar.caption("WhatsApp → Export chat → Without media → .txt upload karo")
@@ -89,14 +126,19 @@ if uploaded_file is None:
     c3.info("**3.** User select karo, aur saara analysis turant dikhega")
     st.stop()
 
+raw_text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+file_key = hashlib.md5(raw_text.encode("utf-8", errors="ignore")).hexdigest()
 try:
-    df = load(uploaded_file.getvalue().decode("utf-8", errors="ignore"))
+    df = load(raw_text)
 except ValueError as e:
     st.error(str(e))
     st.stop()
 
 users = sorted(u for u in df["user"].unique() if u != "group_notification")
 selected_user = st.sidebar.selectbox("👤 Analysis kiske liye", ["Overall"] + users)
+
+ml_on = st.sidebar.toggle("🤖 ML Lab chalao", value=False,
+                          help="Sentiment, Toxicity/Spam detection aur Next-word prediction (pehli baar models train hote hain)")
 
 with st.sidebar.expander("Raw data preview"):
     st.caption(f"Total rows: {len(df):,}")
@@ -136,8 +178,8 @@ i3.markdown(f'<div class="insight">📈 Average: <b>{avg_day:.1f}</b> messages /
 st.write("")
 
 # ------------------------------------------------------------------ tabs
-tab_time, tab_act, tab_users, tab_words, tab_emoji = st.tabs(
-    ["📅 Timeline", "🗓️ Activity", "👥 Users", "🔤 Words", "😀 Emoji"]
+tab_time, tab_act, tab_users, tab_words, tab_emoji, tab_ml = st.tabs(
+    ["📅 Timeline", "🗓️ Activity", "👥 Users", "🔤 Words", "😀 Emoji", "🤖 ML Lab"]
 )
 
 with tab_time:
@@ -235,3 +277,173 @@ with tab_emoji:
                                    textinfo="label+percent", textfont=dict(size=18),
                                    marker=dict(colors=PALETTE)))
             st.plotly_chart(style(fig, 420), width="stretch")
+
+
+# ------------------------------------------------------------------ ML Lab
+with tab_ml:
+    if not ml_on:
+        st.info("Left sidebar mein **🤖 ML Lab chalao** toggle ON karo. Pehli baar models train honge (~10-20 sec), phir sab fast hai.")
+    else:
+        models = get_models()
+        res = run_ml(models, selected_user, file_key, df)
+        if res.empty:
+            st.warning("Is selection mein analyze karne layak text messages nahi mile.")
+            st.stop()
+
+        s_tab, t_tab, n_tab = st.tabs(["😊 Sentiment Analysis", "🚫 Toxicity & Spam", "🔮 Next-word Prediction"])
+
+        # ---------------------------------------------------------- sentiment
+        with s_tab:
+            st.caption("Model: TF-IDF (word + character n-grams) + Logistic Regression, 3 classes: Negative / Neutral / Positive")
+            counts = res["sentiment"].value_counts()
+            total = len(res)
+            m1, m2, m3 = st.columns(3)
+            for col, name, icon in [(m1, "Positive", "😊"), (m2, "Neutral", "😐"), (m3, "Negative", "😞")]:
+                n = int(counts.get(name, 0))
+                col.metric(f"{icon} {name}", f"{n:,}", f"{n / total:.1%} of messages", delta_color="off")
+
+            c1, c2 = st.columns([2, 3])
+            with c1:
+                st.subheader("Mood split")
+                fig = go.Figure(go.Pie(labels=counts.index, values=counts.values, hole=0.55,
+                                       marker=dict(colors=[SENT_COLORS[x] for x in counts.index]),
+                                       textinfo="label+percent"))
+                st.plotly_chart(style(fig, 340), width="stretch")
+            with c2:
+                st.subheader("Sentiment timeline (monthly average)")
+                tl = (res.groupby(["year", "month_num", "month"])["sentiment_score"].mean().reset_index())
+                tl["time"] = tl["month"] + "-" + tl["year"].astype(str)
+                fig = px.line(tl, x="time", y="sentiment_score", markers=True, color_discrete_sequence=[GREEN])
+                fig.add_hline(y=0, line_dash="dot", line_color="#8696A0")
+                fig.update_yaxes(title="Score (-1 negative ... +1 positive)", range=[-1, 1]); fig.update_xaxes(title=None)
+                st.plotly_chart(style(fig, 340), width="stretch")
+
+            if selected_user == "Overall":
+                st.subheader("Kaun kitna positive hai? (average score per user)")
+                per_user = res.groupby("user")["sentiment_score"].agg(["mean", "count"])
+                per_user = per_user[per_user["count"] >= 10].sort_values("mean", ascending=False).reset_index()
+                if per_user.empty:
+                    st.caption("Kisi user ke 10 se zyada messages nahi hain.")
+                else:
+                    fig = px.bar(per_user, x="user", y="mean", color="mean", range_color=[-1, 1],
+                                 color_continuous_scale=[PINK, "#8696A0", GREEN])
+                    fig.update_layout(coloraxis_showscale=False)
+                    fig.update_xaxes(title=None); fig.update_yaxes(title="Avg sentiment score")
+                    st.plotly_chart(style(fig, 340), width="stretch")
+
+            cols = ["user", "message", "sentiment_score"]
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("😊 Sabse positive messages")
+                st.dataframe(res.nlargest(7, "sentiment_score")[cols].round(2), hide_index=True, width="stretch")
+            with c2:
+                st.subheader("😞 Sabse negative messages")
+                st.dataframe(res.nsmallest(7, "sentiment_score")[cols].round(2), hide_index=True, width="stretch")
+
+            st.subheader("✍️ Khud try karo")
+            txt = st.text_input("Koi bhi message likho (Hinglish / English)", key="try_sent")
+            if txt.strip():
+                sc, lb = ml.predict_sentiment_texts(models, [txt])
+                st.markdown(f"**{lb[0]}**  •  score = `{sc[0]:+.2f}`")
+            with st.expander("📊 Model accuracy aur confusion matrix"):
+                model_card(models["sentiment"], ["Negative", "Neutral", "Positive"])
+                st.caption("Training data: 10,000 English tweets (NLTK twitter_samples) + SMS messages (neutral) + chhota hand-written Hinglish set.")
+
+        # ---------------------------------------------------------- toxicity & spam
+        with t_tab:
+            st.caption("Models: TF-IDF + Logistic Regression (alag-alag model: Toxicity, Spam). "
+                       "Threshold = kitni probability par message flag ho.")
+            sc1, sc2 = st.columns(2)
+            tox_th = sc1.slider("Toxicity threshold", 0.30, 0.95, 0.60, 0.05)
+            spam_th = sc2.slider("Spam threshold", 0.30, 0.95, 0.70, 0.05)
+            res["is_toxic"] = res["toxic_prob"] >= tox_th
+            res["is_spam"] = res["spam_prob"] >= spam_th
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("🚫 Toxic messages", f"{int(res['is_toxic'].sum()):,}")
+            k2.metric("Toxic %", f"{res['is_toxic'].mean():.2%}")
+            k3.metric("📢 Spam messages", f"{int(res['is_spam'].sum()):,}")
+            k4.metric("Spam %", f"{res['is_spam'].mean():.2%}")
+
+            if selected_user == "Overall":
+                g = res.groupby("user").agg(messages=("message", "size"), toxic=("is_toxic", "sum"), spam=("is_spam", "sum"))
+                g = g[g["messages"] >= 10]
+                if not g.empty:
+                    g["Toxic %"] = g["toxic"] / g["messages"] * 100
+                    g["Spam %"] = g["spam"] / g["messages"] * 100
+                    long = g.reset_index().melt(id_vars="user", value_vars=["Toxic %", "Spam %"], var_name="type", value_name="percent")
+                    st.subheader("User-wise flagged messages (%)")
+                    fig = px.bar(long, x="user", y="percent", color="type", barmode="group",
+                                 color_discrete_map={"Toxic %": PINK, "Spam %": YELLOW})
+                    fig.update_xaxes(title=None)
+                    st.plotly_chart(style(fig, 340), width="stretch")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("🚫 Flagged toxic messages")
+                tox = res[res["is_toxic"]].sort_values("toxic_prob", ascending=False)[["user", "message", "toxic_prob"]].head(25)
+                if tox.empty:
+                    st.success("Koi toxic message nahi mila 🎉")
+                else:
+                    st.dataframe(tox.round(2), hide_index=True, width="stretch")
+            with c2:
+                st.subheader("📢 Flagged spam messages")
+                sp = res[res["is_spam"]].sort_values("spam_prob", ascending=False)[["user", "message", "spam_prob"]].head(25)
+                if sp.empty:
+                    st.success("Koi spam message nahi mila 🎉")
+                else:
+                    st.dataframe(sp.round(2), hide_index=True, width="stretch")
+
+            st.subheader("✍️ Khud try karo")
+            txt = st.text_input("Koi bhi message likho", key="try_tox")
+            if txt.strip():
+                pt = float(ml.predict_prob(models, "toxicity", [txt])[0])
+                ps = float(ml.predict_prob(models, "spam", [txt])[0])
+                st.write(f"Toxicity probability: **{pt:.0%}**"); st.progress(pt)
+                st.write(f"Spam probability: **{ps:.0%}**"); st.progress(ps)
+            with st.expander("📊 Model accuracy aur confusion matrix"):
+                st.markdown("**Toxicity model**")
+                model_card(models["toxicity"], ["Not toxic", "Toxic"])
+                st.warning("Toxicity model ka training data chhota aur hand-written hai, isliye ye accuracy zyada dikh rahi hai "
+                           "(train aur test sentences ek jaise templates se bane hain). Real chats par galtiyan hongi. "
+                           "Behtar result ke liye Jigsaw jaisa bada dataset use karo.")
+                st.markdown("**Spam model**  (SMS Spam Collection, 5,574 messages + Hinglish seed)")
+                model_card(models["spam"], ["Not spam", "Spam"])
+
+        # ---------------------------------------------------------- next word
+        with n_tab:
+            who = "poori chat" if selected_user == "Overall" else selected_user
+            st.caption(f"Model: Trigram language model (stupid-backoff). Ye **{who}** ke messages se seekhta hai ki agla word kya aa sakta hai.")
+            nw, nw_stats = get_next_word(selected_user, file_key, df)
+            if nw is None:
+                st.warning("Next-word model ke liye kam se kam 30 text messages chahiye.")
+            else:
+                a1, a2, a3, a4 = st.columns(4)
+                a1.metric("Training messages", f"{nw_stats['messages']:,}")
+                a2.metric("Vocabulary", f"{nw_stats['vocab']:,}")
+                a3.metric("Top-1 accuracy", f"{nw_stats['top1']:.1%}")
+                a4.metric("Top-3 accuracy", f"{nw_stats['top3']:.1%}")
+                st.caption(f"Accuracy hold-out 20% messages par ({nw_stats['tested_words']:,} words test kiye).")
+
+                seed = st.text_input("Kuch type karo, model agla word suggest karega", value="", key="nw_seed",
+                                     placeholder="jaise: kal, kya kar, main")
+                preds = nw.predict(seed, k=6)
+                if preds:
+                    pdf = pd.DataFrame(preds, columns=["word", "probability"])
+                    st.markdown("**Suggestions:** " + "  |  ".join(f"`{w}`" for w, _ in preds))
+                    fig = px.bar(pdf, x="probability", y="word", orientation="h", color_discrete_sequence=[GREEN])
+                    fig.update_layout(yaxis=dict(autorange="reversed"))
+                    fig.update_xaxes(tickformat=".0%", title=None); fig.update_yaxes(title=None)
+                    st.plotly_chart(style(fig, 300), width="stretch")
+
+                st.subheader("🎲 Is style mein sentence generate karo")
+                if st.button("Generate 3 sentences"):
+                    for _ in range(3):
+                        st.write("• " + nw.generate(seed))
+                with st.expander("Ye kaise kaam karta hai?"):
+                    st.markdown(
+                        "- Har message ko words mein todte hain aur har 3 words ka combination ginte hain (trigram).\n"
+                        "- Agla word = jo pichhle 2 words ke baad sabse zyada aaya.\n"
+                        "- Agar wo combination kabhi nahi dikha to **backoff**: 1 word ke context par, phir overall frequency par (weight 0.4 se kam hota jaata hai).\n"
+                        "- Isliye model har user ki **apni chatting style** seekhta hai."
+                    )
