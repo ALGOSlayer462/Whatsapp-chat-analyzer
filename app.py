@@ -71,7 +71,7 @@ def kpi(col, label, value, icon, color):
     )
 
 
-@st.cache_data(show_spinner="Chat process ho rahi hai...")
+@st.cache_data(show_spinner="Chat process ho rahi hai...", ttl=600, max_entries=2)
 def load(data: str):
     return preprocessor.preprocess(data)
 
@@ -81,12 +81,12 @@ def get_models():
     return ml.train_all()
 
 
-@st.cache_data(show_spinner="Messages par sentiment / toxicity / spam models chal rahe hain...")
+@st.cache_data(show_spinner="Messages par sentiment / toxicity / spam models chal rahe hain...", ttl=600, max_entries=2)
 def run_ml(_models, user, key, _df):
     return ml.analyze_chat(_models, user, _df)
 
 
-@st.cache_resource(show_spinner="Next-word model ban raha hai...")
+@st.cache_resource(show_spinner="Next-word model ban raha hai...", ttl=600, max_entries=2)
 def get_next_word(user, key, _df):
     return ml.build_next_word_model(user, _df)
 
@@ -113,6 +113,7 @@ SENT_COLORS = {"Positive": GREEN, "Neutral": "#8696A0", "Negative": PINK}
 st.sidebar.markdown("## 💬 Chat Analyzer")
 st.sidebar.caption("WhatsApp → Export chat → Without media → .txt upload karo")
 uploaded_file = st.sidebar.file_uploader("Chat file (.txt)", type=["txt"])
+st.sidebar.caption("🔒 Aapki chat disk par save nahi hoti. Analysis ke dauran server ki memory mein rehti hai aur kuch minute mein hat jaati hai.")
 
 if uploaded_file is None:
     st.markdown(
